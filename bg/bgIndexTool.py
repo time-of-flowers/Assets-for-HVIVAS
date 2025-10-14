@@ -1,70 +1,98 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-generate_bg_index.py
-在 bg/ 目录中运行，自动生成 bg_index.json 文件（无 _root 层级）。
-完全兼容 flattenStructure() 的解析逻辑。
+generate_bg_index_remote.py
+使用 GitHub API 获取远程仓库目录结构，生成 bg_index.json。
 """
 
-import os
 import json
+import requests
 from datetime import datetime
+import time
 
-# 可识别的图片扩展名
-IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp'}
+# ===== 配置部分 =====
+OWNER = "time-of-flowers"
+REPO = "Assets-for-HVIVAS"
+BRANCH = "main"
+ROOT_PATH = "bg"
+OUTPUT_FILE = "bg_index.json"
 
-# 忽略文件列表（可按需调整）
-IGNORE_FILES = {'bg_index.json', 'generate_bg_index.py'}
+# 可识别的图片后缀
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+# 访问间隔（避免 GitHub API 速率限制）
+REQUEST_DELAY = 0.3
+
+# （可选）私有仓库或高频访问可使用个人访问令牌
+GITHUB_TOKEN = ''
+# GITHUB_TOKEN = "ghp_xxx"
+
+# ====================
 
 
-def build_structure(path):
-    """
-    递归扫描目录，构建嵌套结构：
-    - 当前目录仅包含图片 → 返回 list
-    - 否则 → 返回 dict，子目录为键，数组或对象为值
-    """
-    items = sorted(os.listdir(path))
-    images = [f for f in items
-              if os.path.splitext(f)[1].lower() in IMAGE_EXTS and f not in IGNORE_FILES]
-    dirs = [f for f in items if os.path.isdir(os.path.join(path, f))]
+def github_api_request(url):
+    """带重试与可选 Token 的请求封装"""
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
 
-    if not dirs:
-        # 没有子目录，直接返回图片数组
-        return images
+    for _ in range(3):
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code == 200:
+            return r.json()
+        time.sleep(1)
+    print(f"⚠️ 请求失败: {url} ({r.status_code})")
+    return None
 
+
+def build_structure(api_url):
+    """递归获取目录结构"""
+    time.sleep(REQUEST_DELAY)
+    data = github_api_request(api_url)
+    if not data:
+        return {}
+
+    files = []
     structure = {}
-    # 若本层也有图片，可单独作为 "root" 分类
-    if images:
-        structure["."] = images
 
-    for d in dirs:
-        sub_path = os.path.join(path, d)
-        sub_struct = build_structure(sub_path)
-        if sub_struct:
-            structure[d] = sub_struct
+    for item in data:
+        name = item["name"]
+        if item["type"] == "file":
+            if any(name.lower().endswith(ext) for ext in IMAGE_EXTS):
+                files.append(name)
+        elif item["type"] == "dir":
+            sub_struct = build_structure(item["url"])
+            if sub_struct:
+                structure[name] = sub_struct
 
-    return structure
+    # 如果当前目录只包含图片文件，则直接返回列表
+    if structure:
+        if files:
+            structure["."] = files
+        return structure
+    else:
+        return files
 
 
-def generate_index():
-    root_dir = os.path.dirname(os.path.abspath(__file__))
-    structure = build_structure(root_dir)
+def main():
+    root_url = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{ROOT_PATH}?ref={BRANCH}"
+    print(f"[+] Fetching remote structure from {root_url}")
+    structure = build_structure(root_url)
 
-    data = {
+    result = {
         "version": 2,
         "lastUpdate": datetime.utcnow().isoformat() + "Z",
         "structure": structure
     }
 
-    out_path = os.path.join(root_dir, "bg_index.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
 
-    print(f"[✔] bg_index.json 已生成，共 {count_images(structure)} 张图片")
+    total = count_images(structure)
+    print(f"[✔] 生成完成：{OUTPUT_FILE}（共 {total} 张图片）")
 
 
 def count_images(node):
-    """递归计数所有图片数量"""
+    """递归统计图片数量"""
     if isinstance(node, list):
         return len(node)
     elif isinstance(node, dict):
@@ -73,4 +101,4 @@ def count_images(node):
 
 
 if __name__ == "__main__":
-    generate_index()
+    main()
